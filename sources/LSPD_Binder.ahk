@@ -108,6 +108,10 @@ RegisterImageHandler(b) {
     return (*) => ToggleImageBind(b)
 }
 
+RegisterSetMenuHandler(grp) {
+    return (*) => OpenSetMenu(grp)
+}
+
 AnyGuiOpenOrBindRunning() {
     global imageGuis, setMenuState, bindBusy
     if bindBusy
@@ -254,8 +258,7 @@ ApplyKeyGroups(bindList) {
             try Hotkey(rk, handler, b.enabled ? "On" : "Off")
         } else {
             ; Набір — один handler, що відкриває меню
-            capturedGrp := grp
-            handler := (*) => OpenSetMenu(capturedGrp)
+            handler := RegisterSetMenuHandler(grp)
             hotkeyHandlers[rk] := handler
             try Hotkey(rk, handler, anyEnabled ? "On" : "Off")
         }
@@ -707,11 +710,6 @@ OpenSetMenu(grp) {
             " Background222222 +0x200 Border",
             "  " label)
         btn.SetFont("s10 cAFAFAF", "Segoe UI")
-        HoverBtn(btn, "222222", "1A4080")
-
-        capturedB := b
-        clickFn := MakeSetMenuClickHandler(capturedB)
-        btn.OnEvent("Click", clickFn)
 
         yPos += btnH + gap
     }
@@ -733,10 +731,6 @@ OpenSetMenu(grp) {
 
     ; Закриваємо по деактивації вікна (WM_ACTIVATE)
     OnMessage(0x0006, SetMenuDeactivate)
-}
-
-MakeSetMenuClickHandler(b) {
-    return (*) => RunSetMenuBind(b)
 }
 
 MakeSetMenuKeyHandler(idx) {
