@@ -116,6 +116,20 @@ AnyGuiOpenOrBindRunning() {
     return false
 }
 
+IsEditorOrMenuOpen() {
+    if WinActive("LSPD Binder | Редактор біндів")
+        return true
+    if WinActive("Додати новий бінд")
+        return true
+    if WinActive("Редагувати бінд")
+        return true
+    if WinActive("LSPD Binder | Довідка")
+        return true
+    if WinActive("Підтвердження видалення")
+        return true
+    return false
+}
+
 ; --- Esc зупиняє поточний бінд або закриває меню/картинки ---
 #HotIf AnyGuiOpenOrBindRunning()
 Esc:: {
@@ -180,7 +194,7 @@ ReloadBinds(*) {
         }
     }
 
-    TrayTip("Налаштування з Binds.txt застосовано без закриття вікон.", "Бінди перезавантажено!")
+    TrayTip("Налаштування з Binds.txt застосовано.", "Бінди перезавантажено!")
 }
 
 ApplyBinds(newBinds) {
@@ -188,9 +202,11 @@ ApplyBinds(newBinds) {
 
     ; Вимикаємо старі хоткеї через збережений handler (інакше AHK v2 не знаходить
     ; потрібний variant і ігнорує виклик — старий closure лишається активним)
+    HotIf (*) => !IsEditorOrMenuOpen()
     for resolvedKey, handler in hotkeyHandlers {
         try Hotkey(resolvedKey, handler, "Off")
     }
+    HotIf
     hotkeyHandlers := Map()
 
     for k, g in imageGuis {
@@ -217,6 +233,7 @@ ApplyKeyGroups(bindList) {
         groups[rk].Push(b)
     }
 
+    HotIf (*) => !IsEditorOrMenuOpen()
     for rk, grp in groups {
         ; Визначаємо, чи є хоча б один увімкнений бінд у групі
         anyEnabled := false
@@ -240,6 +257,7 @@ ApplyKeyGroups(bindList) {
             try Hotkey(rk, handler, anyEnabled ? "On" : "Off")
         }
     }
+    HotIf
 }
 
 ; =====================================================================
@@ -911,10 +929,11 @@ OpenBindEditor(*) {
     btnAdd  := editorGui.Add("Text", "x16 y450 w120 h32 Background333333 Center +0x200 Border", "➕ Додати")
     btnEdit := editorGui.Add("Text", "x146 y450 w120 h32 Background333333 Center +0x200 Border", "✏️ Редагувати")
     btnDel  := editorGui.Add("Text", "x276 y450 w120 h32 Background333333 Center +0x200 Border", "🗑️ Видалити")
+    btnDup  := editorGui.Add("Text", "x406 y450 w120 h32 Background333333 Center +0x200 Border", "📋 Дублювати")
     btnHelp := editorGui.Add("Text", "x714 y20 w120 h32 Background333333 Center +0x200 Border", "❓ Довідка")
-    for btn in [btnAdd, btnEdit, btnDel, btnHelp]
+    for btn in [btnAdd, btnEdit, btnDel, btnDup, btnHelp]
         btn.SetFont("s10 Bold cAFAFAF", "Segoe UI")
-    for btn in [btnAdd, btnEdit, btnDel, btnHelp, editorBtnSuspend]
+    for btn in [btnAdd, btnEdit, btnDel, btnDup, btnHelp, editorBtnSuspend]
         HoverBtn(btn)
 
     global editorGuiCtx
@@ -933,6 +952,7 @@ OpenBindEditor(*) {
     btnAdd.OnEvent("Click",  (*) => EditorOpenAdd(ctx))
     btnEdit.OnEvent("Click", (*) => EditorBtnEdit(ctx))
     btnDel.OnEvent("Click",  (*) => EditorBtnDel(ctx))
+    btnDup.OnEvent("Click",  (*) => EditorBtnDup(ctx))
     btnHelp.OnEvent("Click", (*) => OpenHelpWindow())
 
     EditorGuiResize(thisGui, minMax, width, height) {
@@ -942,6 +962,7 @@ OpenBindEditor(*) {
         btnAdd.Move(16,           height - 50)
         btnEdit.Move(146,         height - 50)
         btnDel.Move(276,          height - 50)
+        btnDup.Move(406,          height - 50)
         btnHelp.Move(width - 136, 20)
 
         global editorBtnSuspend
@@ -976,6 +997,7 @@ EditorRefreshList(ctx) {
 }
 
 EditorItemCheck(ctx, ctrl, item, checked) {
+    EditorPushHistory(ctx)
     ctx["binds"][item].enabled := checked
     EditorSaveQuiet(ctx)
 }
@@ -1021,17 +1043,139 @@ EditorBtnEdit(ctx) {
     EditorOpenEdit(ctx, row)
 }
 
+global UndoStack := []
+global RedoStack := []
+global SkipDeleteConfirm := false
+
+EditorPushHistory(ctx) {
+    global UndoStack, RedoStack
+    cloneArr := []
+    for b in ctx["binds"]
+        cloneArr.Push(CloneBind(b))
+    UndoStack.Push(cloneArr)
+    if (UndoStack.Length > 50)
+        UndoStack.RemoveAt(1)
+    RedoStack := []
+}
+
+EditorUndo(ctx) {
+    global UndoStack, RedoStack
+    if (UndoStack.Length == 0)
+        return
+    currentArr := []
+    for b in ctx["binds"]
+        currentArr.Push(CloneBind(b))
+    RedoStack.Push(currentArr)
+
+    prevState := UndoStack.Pop()
+    ctx["binds"] := prevState
+    EditorRefreshList(ctx)
+    EditorSaveQuiet(ctx)
+}
+
+EditorRedo(ctx) {
+    global UndoStack, RedoStack
+    if (RedoStack.Length == 0)
+        return
+    currentArr := []
+    for b in ctx["binds"]
+        currentArr.Push(CloneBind(b))
+    UndoStack.Push(currentArr)
+
+    nextState := RedoStack.Pop()
+    ctx["binds"] := nextState
+    EditorRefreshList(ctx)
+    EditorSaveQuiet(ctx)
+}
+
 EditorBtnDel(ctx) {
+    global SkipDeleteConfirm
     row := ctx["lv"].GetNext(0)
     if (row = 0) {
         return
     }
     key := ctx["binds"][row].key
-    if (MsgBox("Видалити бінд [" key "]?", "Підтвердження", "YesNo Icon?") = "Yes") {
-        ctx["binds"].RemoveAt(row)
-        EditorRefreshList(ctx)
-        EditorSaveQuiet(ctx)
+
+    if (!SkipDeleteConfirm) {
+        msgGui := Gui("-Caption +AlwaysOnTop +ToolWindow +Border +Owner" ctx["gui"].Hwnd, "Підтвердження видалення")
+        SetDarkMode(msgGui.Hwnd)
+        msgGui.BackColor := "191919"
+        msgGui.SetFont("s10 cAFAFAF", "Segoe UI")
+        msgGui.Add("Text", "x15 y15 w250 Center", "Видалити бінд [" key "]?")
+        cb := msgGui.Add("Checkbox", "x15 y45 w250 cAFAFAF", "Запам'ятати мій вибір")
+        btnYes := msgGui.Add("Text", "x20 y75 w100 h28 Background333333 Center +0x200 Border", "Так")
+        btnNo := msgGui.Add("Text", "x160 y75 w100 h28 Background333333 Center +0x200 Border", "Ні")
+        HoverBtn(btnYes)
+        HoverBtn(btnNo)
+        res := ""
+        btnYes.OnEvent("Click", (*) => (res := "Yes", SkipDeleteConfirm := cb.Value, msgGui.Destroy()))
+        btnNo.OnEvent("Click", (*) => (res := "No", msgGui.Destroy()))
+        msgGui.Show("w280 h115")
+        WinWaitClose(msgGui.Hwnd)
+        if (res != "Yes")
+            return
     }
+
+    EditorPushHistory(ctx)
+    ctx["binds"].RemoveAt(row)
+    EditorRefreshList(ctx)
+    EditorSaveQuiet(ctx)
+}
+
+global CopiedBind := 0
+
+CloneBind(b) {
+    nb := b.Clone()
+    if (nb.type = "action" && nb.HasProp("steps")) {
+        nb.steps := []
+        for s in b.steps
+            nb.steps.Push(s.Clone())
+    }
+    return nb
+}
+
+EditorBtnDup(ctx) {
+    row := ctx["lv"].GetNext(0)
+    if (row = 0)
+        return
+    EditorPushHistory(ctx)
+    b := ctx["binds"][row]
+    newBind := CloneBind(b)
+    ctx["binds"].InsertAt(row + 1, newBind)
+    EditorRefreshList(ctx)
+    EditorSaveQuiet(ctx)
+    ctx["lv"].Modify(0, "-Select")
+    ctx["lv"].Modify(row + 1, "Select Vis Focus")
+}
+
+EditorBtnCopy(ctx) {
+    global CopiedBind
+    row := ctx["lv"].GetNext(0)
+    if (row = 0)
+        return
+    b := ctx["binds"][row]
+    CopiedBind := CloneBind(b)
+}
+
+EditorBtnPaste(ctx) {
+    global CopiedBind
+    if !IsObject(CopiedBind)
+        return
+    EditorPushHistory(ctx)
+    newBind := CloneBind(CopiedBind)
+
+    row := ctx["lv"].GetNext(0)
+    if (row > 0) {
+        ctx["binds"].InsertAt(row + 1, newBind)
+        targetRow := row + 1
+    } else {
+        ctx["binds"].Push(newBind)
+        targetRow := ctx["binds"].Length
+    }
+    EditorRefreshList(ctx)
+    EditorSaveQuiet(ctx)
+    ctx["lv"].Modify(0, "-Select")
+    ctx["lv"].Modify(targetRow, "Select Vis Focus")
 }
 
 EditorDragDrop(ctx, ctrl, lParam) {
@@ -1108,6 +1252,7 @@ EditorDragDrop(ctx, ctrl, lParam) {
     }
 
     if (finalTarget > 0 && finalTarget != dragRow && finalTarget != dragRow + 1) {
+        EditorPushHistory(ctx)
         if (finalTarget > ctx["binds"].Length)
             finalTarget := ctx["binds"].Length + 1
         temp := ctx["binds"][dragRow]
@@ -1120,9 +1265,6 @@ EditorDragDrop(ctx, ctrl, lParam) {
         EditorSaveQuiet(ctx)
     }
 }
-
-
-
 EditorSaveQuiet(ctx) {
     out := ""
     for b in ctx["binds"] {
@@ -1161,6 +1303,46 @@ EditorSaveQuiet(ctx) {
     }
 }
 
+EditorEditActionOk(ctx, bindIdx, win, nameEdit, keyEdit, nativeCb, stepsBox, *) {
+    newKey := (nativeCb.Value ? "~" : "") keyEdit.Value
+    if (newKey = "" || newKey = "~") {
+        MsgBox("Клавіша не може бути порожньою!", "Помилка", "Icon!")
+        return
+    }
+    EditorParseSteps(stepsBox.Value, &cd, &steps)
+    if (steps.Length = 0) {
+        MsgBox("Бінд має містити хоча б один крок!", "Помилка", "Icon!")
+        return
+    }
+    EditorPushHistory(ctx)
+    ctx["binds"][bindIdx] := { type: "action", name: Trim(nameEdit.Value), key: newKey, enabled: ctx["binds"][bindIdx].enabled, cooldown: cd, steps: steps }
+    EditorRefreshList(ctx)
+    EditorSaveQuiet(ctx)
+    win.Destroy()
+}
+
+EditorEditImageOk(ctx, bindIdx, win, nameEdit, keyEdit, nativeCb, urlEdit, xEdit, yEdit, opEdit, scEdit, *) {
+    newKey := (nativeCb.Value ? "~" : "") keyEdit.Value
+    if (newKey = "" || newKey = "~") {
+        MsgBox("Клавіша не може бути порожньою!", "Помилка", "Icon!")
+        return
+    }
+    newUrl := Trim(urlEdit.Value)
+    if (newUrl = "") {
+        MsgBox("URL не може бути порожнім!", "Помилка", "Icon!")
+        return
+    }
+    nx  := SafeInt(xEdit.Value, 0)
+    ny  := SafeInt(yEdit.Value, 0)
+    nop := SafeInt(opEdit.Value, 255)
+    nsc := SafeInt(scEdit.Value, 100)
+    EditorPushHistory(ctx)
+    ctx["binds"][bindIdx] := { type: "image", name: Trim(nameEdit.Value), key: newKey, enabled: ctx["binds"][bindIdx].enabled, url: newUrl, x: nx, y: ny, opacity: nop, scale: nsc }
+    EditorRefreshList(ctx)
+    EditorSaveQuiet(ctx)
+    win.Destroy()
+}
+
 EditorOpenEdit(ctx, bindIdx) {
     b := ctx["binds"][bindIdx]
     win := Gui("+Owner" ctx["gui"].Hwnd " +ToolWindow", "Редагувати бінд [" b.key "]")
@@ -1184,7 +1366,7 @@ EditorOpenEdit(ctx, bindIdx) {
         win.Add("Text", "x12 y60 cAFAFAF", "Кроки (KEY, підтримує Ctrl+V / TEXT `"...`" / WAIT мс / (кд_мс)):")
         stepsBox := win.Add("Edit", "x12 y78 w500 h200 +Multi Background333333 cAFAFAF", EditorStepsToText(b))
         btnOk     := win.Add("Text", "x12 y290 w100 h28 Background333333 Center +0x200 Border", "✔ Зберегти")
-        btnCancel := win.Add("Text", "x122 y290 w100 h28 Background333333 Center +0x200 Border", "✖ Скасувати")
+        btnCancel := win.Add("Text", "x122 y290 w100 h28 Background333333 Center +0x200 Border", "❌ Скасувати")
         btnCancel.OnEvent("Click", (*) => win.Destroy())
         btnOk.OnEvent("Click", EditorEditActionOk.Bind(ctx, bindIdx, win, nameEdit, keyEdit, nativeCb, stepsBox))
         HoverBtn(btnOk)
@@ -1201,47 +1383,13 @@ EditorOpenEdit(ctx, bindIdx) {
         win.Add("Text", "x252 y108 cAFAFAF", "Масштаб(%):")
         scEdit := win.Add("Edit", "x252 y126 w60 Background333333 cAFAFAF", b.HasProp("scale") ? b.scale : 100)
         btnOk     := win.Add("Text", "x12 y166 w100 h28 Background333333 Center +0x200 Border", "✔ Зберегти")
-        btnCancel := win.Add("Text", "x122 y166 w100 h28 Background333333 Center +0x200 Border", "✖ Скасувати")
+        btnCancel := win.Add("Text", "x122 y166 w100 h28 Background333333 Center +0x200 Border", "❌ Скасувати")
         btnCancel.OnEvent("Click", (*) => win.Destroy())
         btnOk.OnEvent("Click", EditorEditImageOk.Bind(ctx, bindIdx, win, nameEdit, keyEdit, nativeCb, urlEdit, xEdit, yEdit, opEdit, scEdit))
         HoverBtn(btnOk)
         HoverBtn(btnCancel)
     }
     win.Show("AutoSize")
-}
-
-EditorEditActionOk(ctx, bindIdx, win, nameEdit, keyEdit, nativeCb, stepsBox, *) {
-    newKey := Trim(keyEdit.Value)
-    if nativeCb.Value
-        newKey := "~" newKey
-    if (newKey = "" || newKey = "~") {
-        MsgBox("Клавіша не може бути порожньою!", "Помилка", "Icon!")
-        return
-    }
-    EditorParseSteps(stepsBox.Value, &cd, &steps)
-    ctx["binds"][bindIdx] := { type: "action", name: Trim(nameEdit.Value), key: newKey, enabled: ctx["binds"][bindIdx].enabled, cooldown: cd, steps: steps }
-    EditorRefreshList(ctx)
-    EditorSaveQuiet(ctx)
-    win.Destroy()
-}
-
-EditorEditImageOk(ctx, bindIdx, win, nameEdit, keyEdit, nativeCb, urlEdit, xEdit, yEdit, opEdit, scEdit, *) {
-    newKey := Trim(keyEdit.Value)
-    if nativeCb.Value
-        newKey := "~" newKey
-    newUrl := Trim(urlEdit.Value)
-    if (newKey = "" || newKey = "~" || newUrl = "") {
-        MsgBox("Клавіша та URL не можуть бути порожніми!", "Помилка", "Icon!")
-        return
-    }
-    nx  := SafeInt(xEdit.Value, 0)
-    ny  := SafeInt(yEdit.Value, 0)
-    nop := SafeInt(opEdit.Value, 255)
-    nsc := SafeInt(scEdit.Value, 100)
-    ctx["binds"][bindIdx] := { type: "image", name: Trim(nameEdit.Value), key: newKey, enabled: ctx["binds"][bindIdx].enabled, url: newUrl, x: nx, y: ny, opacity: nop, scale: nsc }
-    EditorRefreshList(ctx)
-    EditorSaveQuiet(ctx)
-    win.Destroy()
 }
 
 EditorOpenAdd(ctx) {
@@ -1280,7 +1428,7 @@ EditorOpenAdd(ctx) {
     typeDD.OnEvent("Change", EditorAddTypeChange.Bind(win, stepsBox, imgCtrls))
 
     btnOk     := win.Add("Text", "x12 y306 w100 h28 Background333333 Center +0x200 Border", "✔ Зберегти")
-    btnCancel := win.Add("Text", "x122 y306 w100 h28 Background333333 Center +0x200 Border", "✖ Скасувати")
+    btnCancel := win.Add("Text", "x122 y306 w100 h28 Background333333 Center +0x200 Border", "❌ Скасувати")
     btnCancel.OnEvent("Click", (*) => win.Destroy())
     btnOk.OnEvent("Click", EditorAddOk.Bind(ctx, win, nameEdit, keyEdit, nativeCb, typeDD, stepsBox, urlEdit, xEdit, yEdit, opEdit, scEdit))
     HoverBtn(btnOk)
@@ -1304,6 +1452,7 @@ EditorAddOk(ctx, win, nameEdit, keyEdit, nativeCb, typeDD, stepsBox, urlEdit, xE
         MsgBox("Клавіша не може бути порожньою!", "Помилка", "Icon!")
         return
     }
+    EditorPushHistory(ctx)
     if (typeDD.Value = 1) {
         EditorParseSteps(stepsBox.Value, &cd, &steps)
         ctx["binds"].Push({ type: "action", name: Trim(nameEdit.Value), key: newKey, enabled: true, cooldown: cd, steps: steps })
@@ -1343,6 +1492,8 @@ OpenHelpWindow(*) {
 
     page1Ctrls := []
     page2Ctrls := []
+    page3Ctrls := []
+    curPage := 1
 
     ; --- Заголовок (Завжди видимий) ---
     helpGui.SetFont("s15 Bold cAFAFAF q5", "Segoe UI")
@@ -1419,15 +1570,25 @@ OpenHelpWindow(*) {
     helpGui.SetFont("s9 Norm cAFAFAF", "Segoe UI")
     page2Ctrls.Push(helpGui.Add("Text", "x20 y490 w680", "✅ Галочка «Не перехоплювати» (або ~ перед клавішею): бінд спрацює, і гра ТЕЖ отримає цю клавішу.`n❌ Без галочки «Не перехоплювати» (без ~): бінд спрацює, але гра НЕ отримає натискання цієї клавіші."))
 
+    ; ================= СТОРІНКА 3 =================
+    helpGui.SetFont("s10 Bold cAFAFAF", "Segoe UI")
+    page3Ctrls.Push(helpGui.Add("Text", "x20 y76", "🛠️  Вбудований редактор біндів"))
+    helpGui.SetFont("s9 Norm cAFAFAF", "Segoe UI")
+    page3Ctrls.Push(helpGui.Add("Text", "x20 y96 w680", "Програма має зручний графічний редактор для налаштування біндів.`nКоли відкрито будь-яке вікно редактора, ваші ігрові бінди тимчасово вимикаються, щоб не заважати вільно друкувати та редагувати текст (без конфліктів із гарячими клавішами)."))
+
+    helpGui.SetFont("s10 Bold cAFAFAF", "Segoe UI")
+    page3Ctrls.Push(helpGui.Add("Text", "x20 y150", "Гарячі клавіші редактора:"))
+    helpGui.SetFont("s9 Norm cAFAFAF", "Segoe UI")
+    page3Ctrls.Push(helpGui.Add("Text", "x20 y170 w680", "• Ctrl+C та Ctrl+V (або кнопка Дублювати) — швидке копіювання та вставлення вибраного бінду.`n• Del — видалення бінду. У віконці підтвердження можна поставити галочку «Запам'ятати мій вибір».`n• Ctrl+Z та Ctrl+Y — скасування (Undo) та повторення (Redo) дій. Зберігає до 50 останніх змін."))
 
     ; ================= НАВІГАЦІЯ =================
     helpGui.SetFont("s9 Bold cAFAFAF", "Segoe UI")
-    btnClose := helpGui.Add("Text", "x20 y540 w120 h30 vHelpBtnClose Background333333 Center +0x200 Border", "✖ Закрити")
+    btnClose := helpGui.Add("Text", "x20 y540 w120 h30 vHelpBtnClose Background333333 Center +0x200 Border", "❌ Закрити")
 
-    lblPage := helpGui.Add("Text", "x220 y545 w280 Center c888888 vHelpLblPage Background191919", "Сторінка 1 з 2")
+    lblPage := helpGui.Add("Text", "x220 y545 w280 Center c888888 vHelpLblPage Background191919", "Сторінка 1 з 3")
 
-    btnPrev := helpGui.Add("Text", "x440 y540 w120 h30 vHelpBtnPrev Background333333 Center +0x200 Border", "⬅️ Назад")
-    btnNext := helpGui.Add("Text", "x580 y540 w120 h30 vHelpBtnNext Background333333 Center +0x200 Border", "Вперед ➡️")
+    btnPrev := helpGui.Add("Text", "x440 y540 w120 h30 vHelpBtnPrev Background333333 Center +0x200 Border", "← Назад")
+    btnNext := helpGui.Add("Text", "x580 y540 w120 h30 vHelpBtnNext Background333333 Center +0x200 Border", "Вперед →")
 
     btnClose.OnEvent("Click", (*) => helpGui.Destroy())
     HoverBtn(btnClose)
@@ -1435,18 +1596,22 @@ OpenHelpWindow(*) {
     HoverBtn(btnNext)
 
     UpdatePage(pageNum) {
-        lblPage.Value := "Сторінка " pageNum " з 2"
+        curPage := pageNum
+        lblPage.Value := "Сторінка " pageNum " з 3"
         for c in page1Ctrls
             c.Visible := (pageNum = 1)
         for c in page2Ctrls
             c.Visible := (pageNum = 2)
+        for c in page3Ctrls
+            c.Visible := (pageNum = 3)
 
-        btnPrev.Visible := (pageNum = 2)
-        btnNext.Visible := (pageNum = 1)
+        btnPrev.Visible := (pageNum > 1)
+        btnNext.Visible := (pageNum < 3)
+        DllCall("InvalidateRect", "Ptr", helpGui.Hwnd, "Ptr", 0, "Int", 1)
     }
 
-    btnPrev.OnEvent("Click", (*) => UpdatePage(1))
-    btnNext.OnEvent("Click", (*) => UpdatePage(2))
+    btnPrev.OnEvent("Click", (*) => UpdatePage(curPage - 1))
+    btnNext.OnEvent("Click", (*) => UpdatePage(curPage + 1))
 
     UpdatePage(1) ; Initial state
 
@@ -1469,3 +1634,31 @@ SetDarkMode(hwnd) {
     try DllCall("uxtheme\135", "Int", 2)
     try DllCall("uxtheme\135", "Int", 1)
 }
+
+#HotIf WinActive("LSPD Binder | Редактор біндів")
+^z:: {
+    global editorGuiCtx
+    if IsSet(editorGuiCtx) && IsObject(editorGuiCtx)
+        EditorUndo(editorGuiCtx)
+}
+^y:: {
+    global editorGuiCtx
+    if IsSet(editorGuiCtx) && IsObject(editorGuiCtx)
+        EditorRedo(editorGuiCtx)
+}
+^c:: {
+    global editorGuiCtx
+    if IsSet(editorGuiCtx) && IsObject(editorGuiCtx)
+        EditorBtnCopy(editorGuiCtx)
+}
+^v:: {
+    global editorGuiCtx
+    if IsSet(editorGuiCtx) && IsObject(editorGuiCtx)
+        EditorBtnPaste(editorGuiCtx)
+}
+Del:: {
+    global editorGuiCtx
+    if IsSet(editorGuiCtx) && IsObject(editorGuiCtx)
+        EditorBtnDel(editorGuiCtx)
+}
+#HotIf
